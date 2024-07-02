@@ -69,6 +69,9 @@ class VQADataset(torch.utils.data.Dataset):
         self.df = pandas.read_json(df_path)  # 画像ファイルのパス，question, answerを持つDataFrame
         self.answer = answer
 
+        anno = pd.read_csv('data/data_annotations_class_mapping.csv') ############################
+        coopas = anno.to_dict()
+
         # question / answerの辞書を作成
         self.question2idx = {}
         self.answer2idx = {}
@@ -85,6 +88,12 @@ class VQADataset(torch.utils.data.Dataset):
         self.idx2question = {v: k for k, v in self.question2idx.items()}  # 逆変換用の辞書(question)
 
         if self.answer:
+            # コーパスを入れる #########################
+            for i in range(len(coopas["answer"])):
+                word = coopas["answer"][i]
+                word = process_text(word)
+                if word not in self.answer2idx:
+                    self.answer2idx[word] = len(self.answer2idx)
             # 回答に含まれる単語を辞書に追加
             for answers in self.df["answers"]:
                 for answer in answers:
@@ -110,7 +119,7 @@ class VQADataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         """
-        対応するidxのデータ（画像，質問，回答）を取得．
+        対応するidxのデータ(画像，質問，回答)を取得．
 
         Parameters
         ----------
@@ -131,12 +140,17 @@ class VQADataset(torch.utils.data.Dataset):
         image = Image.open(f"{self.image_dir}/{self.df['image'][idx]}")
         image = self.transform(image)
         question = np.zeros(len(self.idx2question) + 1)  # 未知語用の要素を追加
-        question_words = self.df["question"][idx].split(" ")
+        
+        question_words = process_text(self.df["question"][idx])  ##############
+
+        question_words = question_words.split(" ")
+
         for word in question_words:
             try:
                 question[self.question2idx[word]] = 1  # one-hot表現に変換
             except KeyError:
                 question[-1] = 1  # 未知語
+        
 
         if self.answer:
             answers = [self.answer2idx[process_text(answer["answer"])] for answer in self.df["answers"][idx]]
@@ -290,7 +304,7 @@ def ResNet50():
 class VQAModel(nn.Module):
     def __init__(self, vocab_size: int, n_answer: int):
         super().__init__()
-        self.resnet = ResNet18()
+        self.resnet = ResNet18() 
         self.text_encoder = nn.Linear(vocab_size, 512)
 
         self.fc = nn.Sequential(
@@ -358,18 +372,33 @@ def eval(model, dataloader, optimizer, criterion, device):
     return total_loss / len(dataloader), total_acc / len(dataloader), simple_acc / len(dataloader), time.time() - start
 
 
+# 既存のGCNクラスは存在しないので，自作する.
+class gcn():
+    def __init__(self):
+        pass
+
+    def __call__(self, x):
+        mean = torch.mean(x)
+        std = torch.std(x)
+        return (x - mean)/(std + 10**(-6))  # 0除算を防ぐ
+
+
 def main():
     # deviceの設定
     set_seed(42)
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # dataloader / model
+
+    # dataloader / model  #################################################
+    GCN = gcn()
     transform = transforms.Compose([
+        transforms.RandomHorizontalFlip(p=0.8),
         transforms.Resize((224, 224)),
-        transforms.ToTensor()
+        transforms.ToTensor(),
+        GCN
     ])
-    train_dataset = VQADataset(df_path="./data/train.json", image_dir="./data/train", transform=transform)
-    test_dataset = VQADataset(df_path="./data/valid.json", image_dir="./data/valid", transform=transform, answer=False)
+    train_dataset = VQADataset(df_path="data/train.json", image_dir="data/train", transform=transform)
+    test_dataset = VQADataset(df_path="data/valid.json", image_dir="data/valid", transform=transform, answer=False)
     test_dataset.update_dict(train_dataset)
 
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=128, shuffle=True)
@@ -378,7 +407,7 @@ def main():
     model = VQAModel(vocab_size=len(train_dataset.question2idx)+1, n_answer=len(train_dataset.answer2idx)).to(device)
 
     # optimizer / criterion
-    num_epoch = 20
+    num_epoch = 2
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)
 
